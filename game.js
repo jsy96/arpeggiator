@@ -217,7 +217,7 @@ function _ts_generator(thisArg, body) {
 }
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'; // Import GLTFLoader
-import { HandLandmarker, FilesetResolver } from 'https://esm.sh/@mediapipe/tasks-vision@0.10.14';
+import { HandLandmarker, FilesetResolver, FaceDetector } from 'https://esm.sh/@mediapipe/tasks-vision@0.10.14';
 import { MusicManager } from './MusicManager.js'; // Import the MusicManager
 import * as Tone from 'https://esm.sh/tone'; // Import Tone to access Transport
 import * as drumManager from './DrumManager.js'; // Import the new drum manager module
@@ -315,6 +315,14 @@ export var Game = /*#__PURE__*/ function() {
             new THREE.Color("#D72828"),
             new THREE.Color("#66ffff")
         ];
+        // Face detection for privacy
+        this.faceDetector = null;
+        this.lastFaceDetections = [];
+        this.faceDetectionCounter = 0;
+        this.videoCanvas = null;
+        this.videoCanvasCtx = null;
+        this._tempPixelCanvas = document.createElement('canvas');
+        this._tempPixelCtx = this._tempPixelCanvas.getContext('2d');
         // Initialize asynchronously
         this._init().catch(function(error) {
             console.error("Initialization failed:", error);
@@ -384,7 +392,21 @@ export var Game = /*#__PURE__*/ function() {
                 this.videoElement.muted = true; // Mute video to avoid feedback loops if audio was captured
                 this.videoElement.playsInline = true;
                 this.videoElement.style.zIndex = '0'; // Ensure video is behind THREE canvas
+                this.videoElement.style.opacity = '0'; // Hidden - we draw to canvas with face mosaic
                 this.renderDiv.appendChild(this.videoElement);
+                // Canvas for rendering video with face privacy
+                this.videoCanvas = document.createElement('canvas');
+                this.videoCanvas.style.position = 'absolute';
+                this.videoCanvas.style.top = '0';
+                this.videoCanvas.style.left = '0';
+                this.videoCanvas.style.width = '100%';
+                this.videoCanvas.style.height = '100%';
+                this.videoCanvas.style.transform = 'scaleX(-1)';
+                this.videoCanvas.style.filter = 'grayscale(100%)';
+                this.videoCanvas.style.zIndex = '0';
+                this.videoCanvas.style.pointerEvents = 'none';
+                this.renderDiv.appendChild(this.videoCanvas);
+                this.videoCanvasCtx = this.videoCanvas.getContext('2d');
                 // Container for Status text (formerly Game Over) and restart hint
                 this.gameOverContainer = document.createElement('div');
                 this.gameOverContainer.style.position = 'absolute';
@@ -642,9 +664,9 @@ export var Game = /*#__PURE__*/ function() {
                             case 0:
                                 _state.trys.push([
                                     0,
-                                    4,
+                                    5,
                                     ,
-                                    5
+                                    6
                                 ]);
                                 console.log("Setting up Hand Tracking...");
                                 return [
@@ -667,6 +689,19 @@ export var Game = /*#__PURE__*/ function() {
                             case 2:
                                 _this.handLandmarker = _state.sent();
                                 console.log("HandLandmarker created.");
+                                return [
+                                    4,
+                                    FaceDetector.createFromOptions(vision, {
+                                        baseOptions: {
+                                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+                                            delegate: 'GPU'
+                                        },
+                                        runningMode: 'VIDEO'
+                                    })
+                                ];
+                            case 3:
+                                _this.faceDetector = _state.sent();
+                                console.log("FaceDetector created for privacy.");
                                 console.log("Requesting webcam access...");
                                 return [
                                     4,
@@ -683,7 +718,7 @@ export var Game = /*#__PURE__*/ function() {
                                         audio: false
                                     })
                                 ];
-                            case 3:
+                            case 4:
                                 stream = _state.sent();
                                 _this.videoElement.srcObject = stream;
                                 console.log("Webcam stream obtained.");
@@ -700,12 +735,12 @@ export var Game = /*#__PURE__*/ function() {
                                         };
                                     })
                                 ];
-                            case 4:
+                            case 5:
                                 error = _state.sent();
                                 console.error('Error setting up Hand Tracking or Webcam:', error);
                                 _this._showError("Webcam/Hand Tracking Error: ".concat(error.message, ". Please allow camera access."));
                                 throw error; // Re-throw to stop initialization
-                            case 5:
+                            case 6:
                                 return [
                                     2
                                 ];
@@ -1298,6 +1333,7 @@ export var Game = /*#__PURE__*/ function() {
                 requestAnimationFrame(this._animate.bind(this));
                 if (this.gameState === 'tracking') {
                     var deltaTime = this.clock.getDelta();
+                    this._drawVideoFrame();
                     this._updateHands();
                     this._updateBeatIndicator();
                     if (this.waveformVisualizer) {
@@ -1360,6 +1396,75 @@ export var Game = /*#__PURE__*/ function() {
                         indicator.scale.set(1, 1, 1);
                     }
                 });
+            }
+        },
+        {
+            key: "_drawVideoFrame",
+            value: function _drawVideoFrame() {
+                if (!this.videoElement || this.videoElement.readyState < 2) return;
+                var vw = this.renderDiv.clientWidth;
+                var vh = this.renderDiv.clientHeight;
+                var natW = this.videoElement.videoWidth;
+                var natH = this.videoElement.videoHeight;
+                if (natW === 0 || natH === 0) return;
+                this.videoCanvas.width = vw;
+                this.videoCanvas.height = vh;
+                var ctx = this.videoCanvasCtx;
+                var videoAR = natW / natH;
+                var canvasAR = vw / vh;
+                var drawW, drawH, drawX, drawY;
+                if (videoAR > canvasAR) {
+                    drawH = vh;
+                    drawW = vh * videoAR;
+                    drawX = (vw - drawW) / 2;
+                    drawY = 0;
+                } else {
+                    drawW = vw;
+                    drawH = vw / videoAR;
+                    drawX = 0;
+                    drawY = (vh - drawH) / 2;
+                }
+                ctx.drawImage(this.videoElement, drawX, drawY, drawW, drawH);
+                this.faceDetectionCounter++;
+                if (this.faceDetector && this.faceDetectionCounter % 3 === 0) {
+                    try {
+                        var faceResults = this.faceDetector.detectForVideo(this.videoElement, performance.now());
+                        this.lastFaceDetections = faceResults.detections || [];
+                    } catch(e) {}
+                }
+                if (this.lastFaceDetections && this.lastFaceDetections.length > 0) {
+                    for(var i = 0; i < this.lastFaceDetections.length; i++){
+                        var detection = this.lastFaceDetections[i];
+                        var bbox = detection.boundingBox;
+                        var isNorm = bbox.originX <= 1.5;
+                        var fx = isNorm ? bbox.originX * drawW + drawX : bbox.originX * (drawW / natW) + drawX;
+                        var fy = isNorm ? bbox.originY * drawH + drawY : bbox.originY * (drawH / natH) + drawY;
+                        var fw = isNorm ? bbox.width * drawW : bbox.width * (drawW / natW);
+                        var fh = isNorm ? bbox.height * drawH : bbox.height * (drawH / natH);
+                        var pad = Math.max(fw, fh) * 0.3;
+                        this._pixelateFace(fx - pad, fy - pad, fw + pad * 2, fh + pad * 2);
+                    }
+                }
+            }
+        },
+        {
+            key: "_pixelateFace",
+            value: function _pixelateFace(x, y, w, h) {
+                var ctx = this.videoCanvasCtx;
+                var pixelSize = 12;
+                x = Math.max(0, Math.floor(x));
+                y = Math.max(0, Math.floor(y));
+                w = Math.min(this.videoCanvas.width - x, Math.ceil(w));
+                h = Math.min(this.videoCanvas.height - y, Math.ceil(h));
+                if (w <= 0 || h <= 0) return;
+                var sw = Math.max(1, Math.floor(w / pixelSize));
+                var sh = Math.max(1, Math.floor(h / pixelSize));
+                this._tempPixelCanvas.width = sw;
+                this._tempPixelCanvas.height = sh;
+                this._tempPixelCtx.drawImage(this.videoCanvas, x, y, w, h, 0, 0, sw, sh);
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(this._tempPixelCanvas, 0, 0, sw, sh, x, y, w, h);
+                ctx.imageSmoothingEnabled = true;
             }
         },
         {
